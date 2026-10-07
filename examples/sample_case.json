@@ -1,0 +1,35 @@
+{
+  "title": "API Delivery",
+  "specification": "Deploy an API exposing /health and /quote endpoints according to the documented response schemas.",
+  "required_score": 80,
+  "obligations": [
+    {
+      "id": "api_reachable",
+      "description": "The submitted API must be publicly reachable.",
+      "mandatory": true,
+      "weight": 25
+    },
+    {
+      "id": "health_endpoint",
+      "description": "The /health endpoint must return the required response.",
+      "mandatory": true,
+      "weight": 25
+    },
+    {
+      "id": "quote_schema",
+      "description": "The /quote endpoint must conform to the documented schema.",
+      "mandatory": true,
+      "weight": 35
+    },
+    {
+      "id": "documentation",
+      "description": "Public usage documentation must be provided.",
+      "mandatory": false,
+      "weight": 15
+    }
+  ],
+  "evidence_urls": [
+    "https://example.com/health",
+    "https://example.com/docs"
+  ]
+}
