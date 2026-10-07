@@ -1,0 +1,9 @@
+Source A:
+The deployment completed successfully and the API is reachable.
+
+Source B:
+The reported production endpoint returned an error during independent verification.
+
+Expected ProofSpec behavior:
+Do not guess. Evaluate the relevant obligation from available evidence and
+return UNVERIFIABLE when the contradiction prevents a reliable conclusion.

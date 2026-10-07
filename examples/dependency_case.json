@@ -1,0 +1,39 @@
+{
+  "title": "Production API Delivery",
+  "specification": "Deploy a production API with a reachable service, valid response schema, integration verification, and public documentation.",
+  "required_score": 80,
+  "obligations": [
+    {
+      "id": "deployment",
+      "description": "The production API must be publicly reachable.",
+      "mandatory": true,
+      "weight": 35,
+      "depends_on": []
+    },
+    {
+      "id": "schema",
+      "description": "The deployed API must conform to the agreed response schema.",
+      "mandatory": true,
+      "weight": 30,
+      "depends_on": ["deployment"]
+    },
+    {
+      "id": "integration",
+      "description": "The integration flow must work against the deployed API.",
+      "mandatory": true,
+      "weight": 20,
+      "depends_on": ["schema"]
+    },
+    {
+      "id": "documentation",
+      "description": "Public usage documentation must be available.",
+      "mandatory": false,
+      "weight": 15,
+      "depends_on": []
+    }
+  ],
+  "evidence_urls": [
+    "https://example.com/api",
+    "https://example.com/docs"
+  ]
+}
