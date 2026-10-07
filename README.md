@@ -35,7 +35,7 @@ ProofSpec follows four principles:
 
 ## Status
 
-Early development.
+ProofSpec V2 — live on GenLayer Studio with validated consensus behavior.
 
 ## Live GenLayer Deployment
 
