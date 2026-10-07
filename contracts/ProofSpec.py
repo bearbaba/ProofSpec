@@ -119,6 +119,7 @@ class ProofSpec(gl.Contract):
             description = obligation.get("description")
             mandatory = obligation.get("mandatory")
             weight = obligation.get("weight")
+            depends_on = obligation.get("depends_on", [])
 
             if not isinstance(obligation_id, str) or len(obligation_id.strip()) == 0:
                 raise gl.UserError("Every obligation requires an id")
@@ -140,10 +141,61 @@ class ProofSpec(gl.Contract):
             if weight < 1 or weight > 100:
                 raise gl.UserError("weight must be between 1 and 100")
 
+            if not isinstance(depends_on, list):
+                raise gl.UserError("depends_on must be a list")
+
+            for dependency in depends_on:
+                if not isinstance(dependency, str) or len(dependency.strip()) == 0:
+                    raise gl.UserError("dependency ids must be non-empty strings")
+
+                if dependency == obligation_id:
+                    raise gl.UserError("An obligation cannot depend on itself")
+
             total_weight += weight
 
         if total_weight != 100:
             raise gl.UserError("Obligation weights must total exactly 100")
+
+        # Validate dependency references and reject cycles deterministically.
+        obligation_ids = {
+            obligation["id"]
+            for obligation in obligations
+        }
+
+        dependency_graph = {}
+
+        for obligation in obligations:
+            oid = obligation["id"]
+            dependencies = obligation.get("depends_on", [])
+
+            for dependency in dependencies:
+                if dependency not in obligation_ids:
+                    raise gl.UserError(
+                        "depends_on references an unknown obligation"
+                    )
+
+            dependency_graph[oid] = dependencies
+
+        visiting = {}
+        visited = {}
+
+        def visit(node: str):
+            if node in visited:
+                return
+
+            if node in visiting:
+                raise gl.UserError("Obligation dependency cycle detected")
+
+            visiting[node] = True
+
+            for dependency in dependency_graph[node]:
+                visit(dependency)
+
+            del visiting[node]
+            visited[node] = True
+
+        for oid in dependency_graph:
+            visit(oid)
 
         try:
             evidence_urls = json.loads(evidence_json)
@@ -223,77 +275,135 @@ class ProofSpec(gl.Contract):
 
         required_score = int(case_data.required_score)
 
-        def derive_verdict(result: dict) -> str:
+        def normalize_result(raw_result: dict) -> dict:
             """
-            Verdict is derived deterministically from consensus fields.
+            Converts nondeterministic obligation classifications into a
+            deterministic ProofSpec decision.
 
-            Explicit failure has highest precedence.
-            Unverifiable mandatory obligations are NOT treated as failures.
+            The LLM does NOT choose score or verdict.
             """
 
-            failed = result["mandatory_failed"]
-            unverifiable = result["mandatory_unverifiable"]
-            score = result["score"]
+            obligations = json.loads(case_data.obligations_json)
 
-            if failed > 0:
-                return "FAIL"
+            if not isinstance(raw_result, dict):
+                raise gl.UserError("Invalid adjudication result")
 
-            if unverifiable > 0:
-                return "UNVERIFIABLE"
+            if "obligation_results" not in raw_result:
+                raise gl.UserError("Missing obligation_results")
 
-            if score >= required_score:
-                return "PASS"
+            if "summary" not in raw_result:
+                raise gl.UserError("Missing summary")
 
-            return "PARTIAL"
+            raw_results = raw_result["obligation_results"]
+            summary = raw_result["summary"]
 
-        def validate_result_shape(result: dict) -> bool:
-            if not isinstance(result, dict):
-                return False
-
-            if "score" not in result:
-                return False
-
-            if "mandatory_failed" not in result:
-                return False
-
-            if "mandatory_unverifiable" not in result:
-                return False
-
-            if "summary" not in result:
-                return False
-
-            score = result["score"]
-            failed = result["mandatory_failed"]
-            unverifiable = result["mandatory_unverifiable"]
-            summary = result["summary"]
-
-            if not isinstance(score, int) or isinstance(score, bool):
-                return False
-
-            if score < 0 or score > 100:
-                return False
-
-            if not isinstance(failed, int) or isinstance(failed, bool):
-                return False
-
-            if failed < 0 or failed > 20:
-                return False
-
-            if not isinstance(unverifiable, int) or isinstance(
-                unverifiable, bool
-            ):
-                return False
-
-            if unverifiable < 0 or unverifiable > 20:
-                return False
+            if not isinstance(raw_results, list):
+                raise gl.UserError("obligation_results must be a list")
 
             if not isinstance(summary, str):
-                return False
+                raise gl.UserError("summary must be a string")
 
             if len(summary.strip()) == 0 or len(summary) > 1000:
-                return False
+                raise gl.UserError("Invalid summary")
 
-            return True
+            expected_ids = {
+                obligation["id"]
+                for obligation in obligations
+            }
+
+            status_by_id = {}
+
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    raise gl.UserError("Invalid obligation result")
+
+                oid = item.get("id")
+                status = item.get("status")
+
+                if oid not in expected_ids:
+                    raise gl.UserError("Unknown obligation id")
+
+                if oid in status_by_id:
+                    raise gl.UserError("Duplicate obligation result")
+
+                if status not in (
+                    "SATISFIED",
+                    "UNSATISFIED",
+                    "UNVERIFIABLE",
+                ):
+                    raise gl.UserError("Invalid obligation status")
+
+                status_by_id[oid] = status
+
+            if len(status_by_id) != len(obligations):
+                raise gl.UserError("Missing obligation results")
+
+            # Dependency resolution is deterministic.
+            changed = True
+
+            while changed:
+                changed = False
+
+                for obligation in obligations:
+                    oid = obligation["id"]
+
+                    dependencies = obligation.get("depends_on", [])
+
+                    for dependency in dependencies:
+                        if status_by_id[dependency] != "SATISFIED":
+                            if status_by_id[oid] != "BLOCKED":
+                                status_by_id[oid] = "BLOCKED"
+                                changed = True
+
+                            break
+
+            score = 0
+            mandatory_failed = 0
+            mandatory_unverifiable = 0
+
+            normalized_results = []
+
+            for obligation in obligations:
+                oid = obligation["id"]
+                status = status_by_id[oid]
+
+                if status == "SATISFIED":
+                    score += obligation["weight"]
+
+                if obligation["mandatory"]:
+                    if status == "UNSATISFIED":
+                        mandatory_failed += 1
+
+                    elif status in ("UNVERIFIABLE", "BLOCKED"):
+                        mandatory_unverifiable += 1
+
+                normalized_results.append(
+                    {
+                        "id": oid,
+                        "status": status,
+                    }
+                )
+
+            if mandatory_failed > 0:
+                verdict = "FAIL"
+
+            elif mandatory_unverifiable > 0:
+                verdict = "UNVERIFIABLE"
+
+            elif score >= required_score:
+                verdict = "PASS"
+
+            else:
+                verdict = "PARTIAL"
+
+            return {
+                "obligation_results": normalized_results,
+                "score": score,
+                "mandatory_failed": mandatory_failed,
+                "mandatory_unverifiable": mandatory_unverifiable,
+                "verdict": verdict,
+                "summary": summary,
+            }
 
         def perform_evaluation() -> dict:
             obligations = json.loads(case_data.obligations_json)
@@ -410,19 +520,34 @@ Only count UNSATISFIED mandatory obligations in
 Only count UNVERIFIABLE mandatory obligations in
 "mandatory_unverifiable".
 
-Calculate "score" using the obligation weights.
+Do NOT calculate the final score.
+Do NOT calculate the final verdict.
+Do NOT apply dependency rules.
 
-SATISFIED obligations receive their full weight.
-UNSATISFIED and UNVERIFIABLE obligations receive zero weight.
+The contract will perform those steps deterministically.
+
+Return one classification for every obligation.
 
 Return ONLY this JSON structure:
 
 {{
-  "score": 0,
-  "mandatory_failed": 0,
-  "mandatory_unverifiable": 0,
+  "obligation_results": [
+    {{
+      "id": "exact obligation id",
+      "status": "SATISFIED"
+    }}
+  ],
   "summary": "Concise evidence-based explanation"
 }}
+
+Allowed status values are ONLY:
+
+SATISFIED
+UNSATISFIED
+UNVERIFIABLE
+
+Do not return BLOCKED.
+BLOCKED is derived deterministically by the contract.
 
 Do not add extra keys.
 
@@ -434,10 +559,7 @@ Do not wrap the JSON in markdown.
                 response_format="json",
             )
 
-            if not validate_result_shape(result):
-                raise gl.UserError("Invalid adjudication output")
-
-            return result
+            return normalize_result(result)
 
         def validator_fn(leader_result) -> bool:
             # A malformed/errored leader result should not be accepted.
@@ -446,22 +568,33 @@ Do not wrap the JSON in markdown.
 
             leader_data = leader_result.calldata
 
-            if not validate_result_shape(leader_data):
-                return False
-
             try:
                 validator_data = perform_evaluation()
             except Exception:
                 return False
 
-            if not validate_result_shape(validator_data):
+            # Consensus is based on obligation-level semantic decisions.
+            # Incidental prose is intentionally ignored.
+            leader_statuses = {
+                item["id"]: item["status"]
+                for item in leader_data["obligation_results"]
+            }
+
+            validator_statuses = {
+                item["id"]: item["status"]
+                for item in validator_data["obligation_results"]
+            }
+
+            if leader_statuses != validator_statuses:
                 return False
 
-            # Validators must independently reach the same semantic verdict.
-            if derive_verdict(leader_data) != derive_verdict(validator_data):
+            # Deterministic derived fields must consequently match exactly.
+            if leader_data["verdict"] != validator_data["verdict"]:
                 return False
 
-            # Mandatory requirements are hard gates.
+            if leader_data["score"] != validator_data["score"]:
+                return False
+
             if (
                 leader_data["mandatory_failed"]
                 != validator_data["mandatory_failed"]
@@ -474,12 +607,6 @@ Do not wrap the JSON in markdown.
             ):
                 return False
 
-            # Scores are judgment-derived, so allow bounded variance.
-            if abs(
-                leader_data["score"] - validator_data["score"]
-            ) > 5:
-                return False
-
             return True
 
         consensus_result = gl.vm.run_nondet_unsafe(
@@ -487,7 +614,7 @@ Do not wrap the JSON in markdown.
             validator_fn,
         )
 
-        verdict = derive_verdict(consensus_result)
+        verdict = consensus_result["verdict"]
 
         if verdict == "PASS":
             reason_code = "SPEC_SATISFIED"

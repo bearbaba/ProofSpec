@@ -224,4 +224,136 @@ def test_unverifiable_thesis_is_encoded():
     ).read()
 
     assert "Absence of verifiable evidence is NOT proof of failure" in contract
-    assert 'return "UNVERIFIABLE"' in contract
+    assert 'verdict = "UNVERIFIABLE"' in contract
+    assert '"UNVERIFIABLE", "BLOCKED"' in contract
+
+
+def resolve_graph(obligations, raw_statuses, required_score):
+    statuses = dict(raw_statuses)
+
+    changed = True
+
+    while changed:
+        changed = False
+
+        for obligation in obligations:
+            oid = obligation["id"]
+
+            for dependency in obligation.get("depends_on", []):
+                if statuses[dependency] != "SATISFIED":
+                    if statuses[oid] != "BLOCKED":
+                        statuses[oid] = "BLOCKED"
+                        changed = True
+                    break
+
+    score = 0
+    mandatory_failed = 0
+    mandatory_unverifiable = 0
+
+    for obligation in obligations:
+        status = statuses[obligation["id"]]
+
+        if status == "SATISFIED":
+            score += obligation["weight"]
+
+        if obligation["mandatory"]:
+            if status == "UNSATISFIED":
+                mandatory_failed += 1
+            elif status in ("UNVERIFIABLE", "BLOCKED"):
+                mandatory_unverifiable += 1
+
+    if mandatory_failed:
+        verdict = "FAIL"
+    elif mandatory_unverifiable:
+        verdict = "UNVERIFIABLE"
+    elif score >= required_score:
+        verdict = "PASS"
+    else:
+        verdict = "PARTIAL"
+
+    return verdict, score, statuses
+
+
+def test_dependency_blocks_child():
+    obligations = [
+        {
+            "id": "deploy",
+            "description": "Deployment exists",
+            "mandatory": True,
+            "weight": 50,
+            "depends_on": [],
+        },
+        {
+            "id": "schema",
+            "description": "Schema is correct",
+            "mandatory": True,
+            "weight": 50,
+            "depends_on": ["deploy"],
+        },
+    ]
+
+    verdict, score, statuses = resolve_graph(
+        obligations,
+        {
+            "deploy": "UNVERIFIABLE",
+            "schema": "SATISFIED",
+        },
+        80,
+    )
+
+    assert statuses["schema"] == "BLOCKED"
+    assert score == 0
+    assert verdict == "UNVERIFIABLE"
+
+
+def test_dependency_failure_blocks_child_but_failure_wins():
+    obligations = [
+        {
+            "id": "deploy",
+            "description": "Deployment exists",
+            "mandatory": True,
+            "weight": 50,
+            "depends_on": [],
+        },
+        {
+            "id": "schema",
+            "description": "Schema is correct",
+            "mandatory": True,
+            "weight": 50,
+            "depends_on": ["deploy"],
+        },
+    ]
+
+    verdict, score, statuses = resolve_graph(
+        obligations,
+        {
+            "deploy": "UNSATISFIED",
+            "schema": "SATISFIED",
+        },
+        80,
+    )
+
+    assert statuses["schema"] == "BLOCKED"
+    assert verdict == "FAIL"
+
+
+def test_contract_contains_deterministic_scoring():
+    contract = open(
+        "contracts/ProofSpec.py",
+        encoding="utf-8"
+    ).read()
+
+    assert 'status == "SATISFIED"' in contract
+    assert 'score += obligation["weight"]' in contract
+    assert 'Do NOT calculate the final score' in contract
+
+
+def test_contract_contains_obligation_level_consensus():
+    contract = open(
+        "contracts/ProofSpec.py",
+        encoding="utf-8"
+    ).read()
+
+    assert "leader_statuses" in contract
+    assert "validator_statuses" in contract
+    assert 'leader_statuses != validator_statuses' in contract
